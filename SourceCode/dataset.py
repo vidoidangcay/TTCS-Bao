@@ -4,17 +4,15 @@ from torch.utils.data import DataLoader
 
 transform = transforms.Compose([
     transforms.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE)),
-    transforms.Grayscale(),
+    transforms.Grayscale(),  # 1 channel
     transforms.ToTensor()
 ])
 
 def get_dataloaders():
-
     train_dataset = datasets.ImageFolder(
         root=config.TRAIN_DIR,
         transform=transform
     )
-
     test_dataset = datasets.ImageFolder(
         root=config.TEST_DIR,
         transform=transform
@@ -35,3 +33,10 @@ def get_dataloaders():
     )
 
     return train_loader, test_loader
+
+if __name__ == "__main__":
+    train_loader, test_loader = get_dataloaders()
+    for images, labels in train_loader:
+        print(images.shape)  # [BATCH_SIZE, 1, 48, 48]
+        print(labels)
+        break
