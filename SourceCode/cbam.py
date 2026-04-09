@@ -1,8 +1,6 @@
-# cbam.py
 import torch
 import torch.nn as nn
 
-# Channel Attention
 class ChannelAttention(nn.Module):
     def __init__(self, in_channels, reduction=16):
         super(ChannelAttention, self).__init__()
@@ -23,7 +21,6 @@ class ChannelAttention(nn.Module):
         out = self.sigmoid(out).view(b,c,1,1)
         return x * out
 
-# Spatial Attention
 class SpatialAttention(nn.Module):
     def __init__(self, kernel_size=7):
         super(SpatialAttention, self).__init__()

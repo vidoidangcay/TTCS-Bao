@@ -1,5 +1,5 @@
-TRAIN_DIR = "data/train"
-TEST_DIR = "data/test"
+TRAIN_DIR = "archive/train"
+TEST_DIR = "archive/test"
 
 IMAGE_SIZE = 48
 BATCH_SIZE = 32

@@ -27,7 +27,6 @@ class CNNBaseline(nn.Module):
         x = self.fc2(x)
         return x
 
-# Test forward
 if __name__ == "__main__":
     model = CNNBaseline()
     x = torch.randn(4,1,48,48)
