@@ -129,6 +129,7 @@ class ExpressionApp:
         self.model_status_var = tk.StringVar(value="")
         self.status_var = tk.StringVar(value="Sẵn sàng")
         self.image_preview = None
+        self.preview_original_image = None
         self.thumbnail_refs = []
         self.cancel_event = threading.Event()
 
@@ -143,7 +144,7 @@ class ExpressionApp:
 
         control_frame = ttk.Frame(self.root, padding=(12, 10, 12, 10), style="Card.TFrame")
         control_frame.pack(fill=tk.X)
-        for col in range(9):
+        for col in range(10):
             control_frame.columnconfigure(col, weight=0)
         control_frame.columnconfigure(1, weight=1)
         control_frame.columnconfigure(3, weight=0)
@@ -161,6 +162,7 @@ class ExpressionApp:
         ttk.Button(control_frame, text="Làm mới", command=self.on_cancel_task).grid(row=0, column=6, padx=4)
         ttk.Button(control_frame, text="Chọn ảnh test", command=self.on_select_image).grid(row=0, column=7, padx=4)
         ttk.Button(control_frame, text="Random 20 ảnh test", command=self.on_random_test).grid(row=0, column=8, padx=4)
+        ttk.Button(control_frame, text="Đánh giá test", command=self.on_evaluate_test).grid(row=0, column=9, padx=4)
 
         status_frame = ttk.Frame(self.root, padding=(12, 0, 12, 8), style="Card.TFrame")
         status_frame.pack(fill=tk.X)
@@ -183,6 +185,12 @@ class ExpressionApp:
         self.preview_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.prediction_label = ttk.Label(preview_box, text="Chưa có dự đoán", font=("Segoe UI", 12, "bold"))
         self.prediction_label.pack(padx=10, pady=6)
+        self.evaluation_label = ttk.Label(preview_box, text="Chưa đánh giá test", font=("Segoe UI", 10))
+        self.evaluation_label.pack(padx=10, pady=(0, 6))
+
+        self.confusion_image = None
+        self.confusion_image_label = ttk.Label(preview_box)
+        self.confusion_image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
         self.random_frame = ttk.LabelFrame(self.root, text="Random 20 ảnh test", padding=10, style="Card.TLabelframe")
         self.random_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
@@ -399,6 +407,7 @@ class ExpressionApp:
         image = image.resize((320, 320), RESAMPLE)
         self.image_preview = ImageTk.PhotoImage(image)
         self.preview_label.config(image=self.image_preview)
+        self.preview_label.image = self.image_preview
 
         if true_label:
             display_text = f"Thực tế: {true_label} | Dự đoán: {label} ({prob*100:.1f}%)"
@@ -410,6 +419,157 @@ class ExpressionApp:
         self.prediction_label.config(text=display_text)
         self.set_status(f"Dự đoán xong: {label} ({prob*100:.1f}%)")
         self.append_log(log_text)
+
+    def on_evaluate_test(self):
+        checkpoint_path = self.checkpoint_var.get().strip()
+        if checkpoint_path == "":
+            checkpoint_path = get_checkpoint_path(self.model_var.get())
+            if checkpoint_path:
+                self.checkpoint_var.set(checkpoint_path)
+        if not checkpoint_path or not os.path.exists(checkpoint_path):
+            messagebox.showwarning("Checkpoint thiếu", "Vui lòng chọn hoặc huấn luyện checkpoint trước khi đánh giá test.")
+            return
+
+        self.set_status("Đang đánh giá test...")
+        self.append_log(f"[EVAL] Bắt đầu đánh giá model {self.model_var.get()} trên tập test")
+        thread = threading.Thread(target=self.evaluate_test_thread, args=(self.model_var.get(), checkpoint_path), daemon=True)
+        thread.start()
+
+    def evaluate_test_thread(self, model_name, checkpoint_path):
+        device = get_device()
+        try:
+            _, _, test_loader = get_dataloaders(model_name)
+            model = get_model(model_name).to(device)
+            load_model_checkpoint(model, checkpoint_path, device)
+            model.eval()
+
+            y_true = []
+            y_pred = []
+            total = 0
+            correct = 0
+            criterion = nn.CrossEntropyLoss()
+            with torch.no_grad():
+                for images, labels in test_loader:
+                    images = images.to(device)
+                    labels = labels.to(device)
+                    outputs = model(images)
+                    preds = outputs.argmax(dim=1)
+                    correct += (preds == labels).sum().item()
+                    total += labels.size(0)
+                    y_true.extend(labels.cpu().tolist())
+                    y_pred.extend(preds.cpu().tolist())
+
+            accuracy = correct / total if total else 0.0
+            report_text, cm = self.classification_report_manual(y_true, y_pred, LABELS)
+            self.root.after(0, lambda: self.on_evaluation_finished(accuracy, report_text, cm, y_true, y_pred))
+        except Exception as exc:
+            self.root.after(0, lambda: self.on_evaluation_error(exc))
+
+    def on_evaluation_finished(self, accuracy, report_text, cm, y_true, y_pred):
+        self.set_status(f"Đã đánh giá test: accuracy {accuracy*100:.2f}%")
+        self.evaluation_label.config(text=f"Đã đánh giá test: {accuracy*100:.2f}%")
+        self.append_log(f"[EVAL] Accuracy trên tập test: {accuracy*100:.2f}%")
+        self.append_log("[EVAL] Classification report:")
+        for line in report_text.splitlines():
+            self.append_log(line)
+        save_path = self.plot_confusion_matrix(y_true, y_pred, LABELS)
+        if save_path:
+            self.open_confusion_chart_window(save_path)
+
+    def on_evaluation_error(self, exc):
+        self.update_model_status()
+        self.set_status("Lỗi khi đánh giá test")
+        self.append_log(f"[ERROR] Đánh giá test thất bại: {exc}")
+        messagebox.showerror("Lỗi", f"Không thể đánh giá test:\n{exc}")
+
+    def classification_report_manual(self, y_true, y_pred, labels):
+        cm = self.confusion_matrix_manual(y_true, y_pred, labels)
+        report_lines = []
+        header = f"{'label':<12} {'precision':>9} {'recall':>9} {'f1-score':>9} {'support':>8}"
+        report_lines.append(header)
+        report_lines.append('-' * len(header))
+
+        total_support = 0
+        total_correct = 0
+        for idx, label in enumerate(labels):
+            tp = cm[idx][idx]
+            support = sum(cm[idx])
+            predicted = sum(row[idx] for row in cm)
+            precision = tp / predicted if predicted > 0 else 0.0
+            recall = tp / support if support > 0 else 0.0
+            f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+            report_lines.append(f"{label:<12} {precision:9.4f} {recall:9.4f} {f1:9.4f} {support:8d}")
+            total_support += support
+            total_correct += tp
+
+        accuracy = total_correct / total_support if total_support > 0 else 0.0
+        report_lines.append('-' * len(header))
+        report_lines.append(f"{'accuracy':<12} {accuracy:9.4f} {'':>9} {'':>9} {total_support:8d}")
+        return '\n'.join(report_lines), cm
+
+    def confusion_matrix_manual(self, y_true, y_pred, labels):
+        matrix = [[0 for _ in labels] for _ in labels]
+        for t, p in zip(y_true, y_pred):
+            matrix[t][p] += 1
+        return matrix
+
+    def plot_confusion_matrix(self, y_true, y_pred, labels, save_path="confusion_matrix.png"):
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            cm = self.confusion_matrix_manual(y_true, y_pred, labels)
+            self.append_log("[EVAL] Confusion matrix:")
+            for label, row in zip(labels, cm):
+                self.append_log(f"{label:<12} {' '.join(str(x) for x in row)}")
+            self.append_log("Cài matplotlib để lưu ảnh confusion matrix: pip install matplotlib")
+            return None
+
+        cm = self.confusion_matrix_manual(y_true, y_pred, labels)
+        fig, ax = plt.subplots(figsize=(10, 10))
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha='right')
+        ax.set_yticklabels(labels)
+        ax.set_xlabel('Predicted')
+        ax.set_ylabel('True')
+        ax.set_title('Confusion Matrix')
+
+        max_val = max(max(row) for row in cm) if cm else 0
+        for i in range(len(cm)):
+            for j in range(len(cm[i])):
+                color = 'white' if cm[i][j] > max_val / 2 else 'black'
+                ax.text(j, i, str(cm[i][j]), ha='center', va='center', color=color, fontsize=8)
+
+        fig.colorbar(im, ax=ax)
+        plt.tight_layout()
+        fig.savefig(save_path)
+        plt.close(fig)
+        self.append_log(f"[EVAL] Confusion matrix saved to {save_path}")
+        return save_path
+
+    def display_confusion_image(self, image_path):
+        try:
+            image = Image.open(image_path).resize((320, 320), RESAMPLE)
+            self.confusion_image = ImageTk.PhotoImage(image)
+            self.confusion_image_label.config(image=self.confusion_image)
+        except Exception as exc:
+            self.append_log(f"[ERROR] Không thể hiển thị confusion matrix: {exc}")
+
+    def open_confusion_chart_window(self, image_path):
+        try:
+            chart_window = tk.Toplevel(self.root)
+            chart_window.title("Confusion Matrix")
+            chart_window.geometry("620x620")
+            chart_canvas = tk.Canvas(chart_window, bg="#ffffff")
+            chart_canvas.pack(fill=tk.BOTH, expand=True)
+            image = Image.open(image_path)
+            image = image.resize((580, 580), RESAMPLE)
+            chart_image = ImageTk.PhotoImage(image)
+            chart_canvas.create_image(0, 0, anchor="nw", image=chart_image)
+            chart_canvas.image = chart_image
+        except Exception as exc:
+            self.append_log(f"[ERROR] Không thể mở cửa sổ confusion matrix: {exc}")
 
     def on_random_test(self):
         checkpoint_path = self.checkpoint_var.get().strip()

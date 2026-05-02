@@ -76,6 +76,105 @@ def evaluate(model, loader, criterion, device):
     return (total_loss / total) if total else 0.0, (correct / total) if total else 0.0
 
 
+def evaluate_with_metrics(model, loader, criterion, device):
+    model.eval()
+    total_loss = 0.0
+    correct = 0
+    total = 0
+    all_preds = []
+    all_labels = []
+
+    with torch.no_grad():
+        for images, labels in loader:
+            images = images.to(device)
+            labels = labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            total_loss += loss.item() * images.size(0)
+            preds = outputs.argmax(dim=1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+
+    avg_loss = (total_loss / total) if total else 0.0
+    accuracy = (correct / total) if total else 0.0
+    return avg_loss, accuracy, all_labels, all_preds
+
+
+def confusion_matrix_manual(y_true, y_pred, labels):
+    label_to_idx = {label: idx for idx, label in enumerate(labels)}
+    matrix = [[0 for _ in labels] for _ in labels]
+    for t, p in zip(y_true, y_pred):
+        matrix[t][p] += 1
+    return matrix
+
+
+def classification_report_manual(y_true, y_pred, labels):
+    cm = confusion_matrix_manual(y_true, y_pred, labels)
+    report_lines = []
+    header = f"{'label':<12} {'precision':>9} {'recall':>9} {'f1-score':>9} {'support':>8}"
+    report_lines.append(header)
+    report_lines.append('-' * len(header))
+
+    total_support = 0
+    total_correct = 0
+    precision_sum = 0.0
+    recall_sum = 0.0
+    support_sum = 0
+
+    for idx, label in enumerate(labels):
+        tp = cm[idx][idx]
+        support = sum(cm[idx])
+        pred_positive = sum(row[idx] for row in cm)
+        precision = tp / pred_positive if pred_positive > 0 else 0.0
+        recall = tp / support if support > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        report_lines.append(f"{label:<12} {precision:9.4f} {recall:9.4f} {f1:9.4f} {support:8d}")
+        total_support += support
+        total_correct += tp
+        precision_sum += precision * support
+        recall_sum += recall * support
+        support_sum += support
+
+    accuracy = total_correct / total_support if total_support > 0 else 0.0
+    macro_precision = sum(cm[idx][idx] / (sum(row[idx] for row in cm) or 1) if sum(row[idx] for row in cm) > 0 else 0.0 for idx in range(len(labels))) / len(labels)
+    macro_recall = sum(cm[idx][idx] / (sum(cm[idx]) or 1) if sum(cm[idx]) > 0 else 0.0 for idx in range(len(labels))) / len(labels)
+    macro_f1 = sum(
+        (2 * (cm[idx][idx] / (sum(row[idx] for row in cm) or 1)) * (cm[idx][idx] / (sum(cm[idx]) or 1)) /
+         ((cm[idx][idx] / (sum(row[idx] for row in cm) or 1)) + (cm[idx][idx] / (sum(cm[idx]) or 1))) if ((cm[idx][idx] / (sum(row[idx] for row in cm) or 1)) + (cm[idx][idx] / (sum(cm[idx]) or 1))) > 0 else 0.0)
+        for idx in range(len(labels))
+    ) / len(labels)
+
+    report_lines.append('-' * len(header))
+    report_lines.append(f"{'accuracy':<12} {accuracy:9.4f} {'':>9} {'':>9} {total_support:8d}")
+    report_lines.append(f"{'macro avg':<12} {macro_precision:9.4f} {macro_recall:9.4f} {macro_f1:9.4f} {total_support:8d}")
+    return '\n'.join(report_lines), cm
+
+
+def plot_confusion_matrix(y_true, y_pred, labels, save_path="confusion_matrix.png"):
+    try:
+        import matplotlib.pyplot as plt
+        from sklearn.metrics import ConfusionMatrixDisplay
+    except ImportError:
+        cm = confusion_matrix_manual(y_true, y_pred, labels)
+        print("Confusion matrix:")
+        for label, row in zip(labels, cm):
+            print(f"{label:<12}", ' '.join(str(x) for x in row))
+        print("\nInstall matplotlib to save a plotted confusion matrix: pip install matplotlib")
+        return
+
+    cm = confusion_matrix(y_true, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+    fig, ax = plt.subplots(figsize=(10, 10))
+    disp.plot(ax=ax, cmap="Blues", xticks_rotation=45)
+    plt.title("Confusion Matrix")
+    plt.tight_layout()
+    fig.savefig(save_path)
+    plt.close(fig)
+    print(f"Confusion matrix saved to {save_path}")
+
+
 def save_model(model, model_name):
     os.makedirs("saved_models", exist_ok=True)
     path = os.path.join("saved_models", f"{model_name}_best.pth")
@@ -212,8 +311,17 @@ def main():
 
         model = get_model(args.model)
         model = load_model(model, checkpoint_path, device)
-        test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+        test_loss, test_acc, y_true, y_pred = evaluate_with_metrics(model, test_loader, criterion, device)
         print(f"Kết quả test: loss={test_loss:.4f}, accuracy={test_acc:.4f}")
+        print("\nClassification report:")
+        report_text, _ = classification_report_manual(
+            y_true, y_pred,
+            ["angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"]
+        )
+        print(report_text)
+        plot_confusion_matrix(y_true, y_pred, [
+            "angry", "disgust", "fear", "happy", "neutral", "sad", "surprise"
+        ])
 
 
 if __name__ == "__main__":
